@@ -6,8 +6,7 @@ module order_book_top (
 
     // --- External Interface (UDP/Strategy) ---
     input wire input_valid,
-    input wire input_is_buy,
-    input wire [31:0] input_data, // {Price, ID, Qty}
+    input wire [31:0] input_data, // {Price, IsBuy, ID, Qty}
 
     // --- Status / Debug ---
     output wire engine_busy,
@@ -59,7 +58,6 @@ module order_book_top (
         
         // Input
         .input_valid    (input_valid),
-        .input_is_buy   (input_is_buy),
         .input_data     (input_data),
         .engine_busy    (engine_busy),
 

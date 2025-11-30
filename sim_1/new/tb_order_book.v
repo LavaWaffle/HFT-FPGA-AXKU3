@@ -11,7 +11,6 @@ module tb_order_book;
 
     // Inputs to DUT
     reg input_valid;
-    reg input_is_buy;
     reg [31:0] input_data; // {Price, ID, Qty}
 
     // Outputs from DUT
@@ -27,7 +26,6 @@ module tb_order_book;
         .clk(clk),
         .rst_n(rst_n),
         .input_valid(input_valid),
-        .input_is_buy(input_is_buy),
         .input_data(input_data),
         .engine_busy(engine_busy),
         .leds(leds),
@@ -46,10 +44,10 @@ module tb_order_book;
     
     // Task: Submit an Order
     task submit_order;
-        input is_buy;
-        input [15:0] price;
-        input [14:0] qty;
-        input is_bot;
+        input is_buy;        // 1 bit
+        input [15:0] price;  // 16 bits
+        input [13:0] qty;    // 14 bits (Shrunk from 15)
+        input is_bot;        // 1 bit
         begin
             // Wait for engine to be ready
             wait(engine_busy == 0);
@@ -57,10 +55,8 @@ module tb_order_book;
 
             // Construct Data Packet
             input_valid = 1;
-            input_is_buy = is_buy;
-            // Pack: Price [31:16], ID [15], Qty [14:0]
-            input_data = {price, is_bot, qty};
-            
+            // Price [31:16] | Side [15] | ID [14] | Qty [13:0]
+            input_data = {price, is_buy, is_bot, qty};
             @(posedge clk);
             input_valid = 0;
             
@@ -111,7 +107,6 @@ module tb_order_book;
         rst_n = 0;
         input_valid = 0;
         input_data = 0;
-        input_is_buy = 0;
 
         $display("=== SIMULATION START ===");
         

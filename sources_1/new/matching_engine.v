@@ -6,7 +6,6 @@ module matching_engine (
 
     // --- Input from UDP/Strategy ---
     input wire input_valid,
-    input wire input_is_buy,
     input wire [31:0] input_data, // {Price, ID, Qty}
     output reg engine_busy,
 
@@ -89,10 +88,10 @@ module matching_engine (
                     if (input_valid) begin
                         engine_busy <= 1;
                         // Latch the incoming order
-                        my_is_buy <= input_is_buy;
                         my_price  <= `PRICE(input_data);
+                        my_is_buy <= `IS_BUY(input_data); // Extracted from packet
+                        my_id     <= `IS_BOT(input_data);
                         my_qty    <= `QTY(input_data);
-                        my_id     <= `IS_BOT(input_data); // unused in matching, passed through
                         
                         state <= CHECK_MATCH;
                     end else begin
