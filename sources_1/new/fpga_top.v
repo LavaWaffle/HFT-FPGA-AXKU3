@@ -348,6 +348,38 @@ module fpga_top (
     );
 
     assign udp_pulse = udp_tx_valid;
+    
+    wire [31:0] trade_info;
+    wire        trade_valid;
+    wire        engine_busy;
+    wire [31:0] debug_ob_data;   
+    wire        debug_fifo_empty;
+    wire        debug_fifo_full; 
+    
+    // Trading System Wrapper
+    trading_system_top trading_sys (
+        // Clocks
+        .clk_udp(clk_125m),
+        .rst_udp(rst_125m),
+        .clk_engine(clk_200m),    // Using your 200MHz buffer
+        .rst_engine(!rst_n),      // Use system reset
+
+        // RX Stream (Connects to the same wires as UDP Echo)
+        .rx_axis_tdata(rx_axis_tdata),
+        .rx_axis_tvalid(rx_axis_tvalid),
+        .rx_axis_tlast(rx_axis_tlast),
+
+        // Outputs (Map these to ILA or top level pins if available)
+        .trade_info(trade_info),
+        .trade_valid(trade_valid),
+        .engine_busy(engine_busy),
+        .leds(), // Physical LEDs can stay connected if you want
+        
+        // Connect Debug Ports
+        .debug_ob_data(debug_ob_data),
+        .debug_fifo_empty(debug_fifo_empty),
+        .debug_fifo_full(debug_fifo_full)
+    );
 
     // AXI Stream Arbiter (Port 0 = UDP, Port 1 = ARP)
     axis_arb_mux #(
@@ -403,23 +435,29 @@ module fpga_top (
     // -------------------------------------------------------------------------
     
     ila_0 my_ila (
-        .clk(clk_125m), 
+        .clk(clk_125m), // NOTE: We are sampling everything on 125MHz. 
+                        // Fast signals (200MHz) might look slightly jittery but 
+                        // readable for Valid/Data pulses.
         
-        // SLOT 0: RX Interface (What are we receiving?)
+        // SLOT 0: UDP RX (The Network Input)
         .probe0(rx_axis_tdata),      // [7:0]
         .probe1(rx_axis_tvalid),     // [0:0]
-        .probe2(rx_axis_tlast),      // [0:0] <-- Added
+        .probe2(rx_axis_tlast),      // [0:0]
         
-        // SLOT 1: TX Interface (What are we sending?)
+        // SLOT 1: UDP TX (The Echo Reply)
         .probe3(tx_axis_tdata),      // [7:0]
         .probe4(tx_axis_tvalid),     // [0:0]
-        .probe5(tx_axis_tlast),      // [0:0] <-- Added
-        .probe6(tx_axis_tready),     // [0:0] 
+        .probe5(udp_pulse),          // [0:0] (Did UDP Engine reply?)
         
-        // SLOT 2: Internals & Status
-        .probe7(udp_tx_valid),       // [0:0] <-- Tells us "It was ME who sent that!"
-        .probe8(status_link_up),     // [0:0] <-- Cable status
-        .probe9(eth_mmcm_locked)     // [0:0] <-- Clock status
+        // SLOT 2: ORDER BOOK INPUT (What did the FIFO deliver?)
+        .probe6(debug_ob_data),      // [31:0] <--- CRITICAL: Check Endianness here
+        .probe7(debug_fifo_empty),   // [0:0]
+        .probe8(debug_fifo_full),    // [0:0]
+        
+        // SLOT 3: ORDER BOOK OUTPUT (Did we trade?)
+        .probe9(trade_info),         // [31:0] <--- CRITICAL: See Trade Price/Qty
+        .probe10(trade_valid),       // [0:0]  <--- Trigger on this!
+        .probe11(engine_busy)        // [0:0]
     );
 
 endmodule
