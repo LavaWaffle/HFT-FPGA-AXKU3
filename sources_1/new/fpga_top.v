@@ -129,7 +129,7 @@ module fpga_top (
 
     eth_mac_1g #(
         .ENABLE_PADDING(1),
-        .MIN_FRAME_LENGTH(10) // Relaxed for testing
+        .MIN_FRAME_LENGTH(10)
     ) mac_inst (        
         // Logic Interface Clocks & Resets
         .tx_clk(clk_125m),
@@ -306,27 +306,50 @@ module fpga_top (
     );
 
     // -------------------------------------------------------------------------
-    // 5. ICMP Echo Engine & AXI Stream Arbiter
+    // 5. UDP Echo Engine & AXI Stream Arbiter
     // -------------------------------------------------------------------------
-    wire [7:0] icmp_tx_data;
-    wire       icmp_tx_valid, icmp_tx_last, icmp_tx_ready;
-    wire       ping_pulse;
+//    wire [7:0] icmp_tx_data;
+//    wire       icmp_tx_valid, icmp_tx_last, icmp_tx_ready;
+//    wire       ping_pulse;
 
-    icmp_echo_engine echo_inst (
+//    icmp_echo_engine echo_inst (
+//        .clk(clk_125m),
+//        .rst(rst_125m),
+//        .s_axis_tdata(rx_axis_tdata),   
+//        .s_axis_tvalid(rx_axis_tvalid),
+//        .s_axis_tlast(rx_axis_tlast),
+//        .s_axis_tready(), 
+//        .m_axis_tdata(icmp_tx_data),
+//        .m_axis_tvalid(icmp_tx_valid),
+//        .m_axis_tlast(icmp_tx_last),
+//        .m_axis_tready(icmp_tx_ready),
+//        .ping_detect(ping_pulse)
+//    );
+
+    wire [7:0] udp_tx_data;
+    wire       udp_tx_valid, udp_tx_last, udp_tx_ready;
+    wire       udp_pulse;
+    
+    udp_hardcoded_echo udp_inst (
         .clk(clk_125m),
         .rst(rst_125m),
-        .s_axis_tdata(rx_axis_tdata),   
+        
+        // RX Input
+        .s_axis_tdata(rx_axis_tdata),    
         .s_axis_tvalid(rx_axis_tvalid),
         .s_axis_tlast(rx_axis_tlast),
-        .s_axis_tready(), 
-        .m_axis_tdata(icmp_tx_data),
-        .m_axis_tvalid(icmp_tx_valid),
-        .m_axis_tlast(icmp_tx_last),
-        .m_axis_tready(icmp_tx_ready),
-        .ping_detect(ping_pulse)
+        .s_axis_tready(), // Open or connected to logic if needed
+        
+        // TX Output
+        .m_axis_tdata(udp_tx_data),
+        .m_axis_tvalid(udp_tx_valid),
+        .m_axis_tlast(udp_tx_last),
+        .m_axis_tready(udp_tx_ready)
     );
 
-    // AXI Stream Arbiter (Port 0 = ICMP, Port 1 = ARP)
+    assign udp_pulse = udp_tx_valid;
+
+    // AXI Stream Arbiter (Port 0 = UDP, Port 1 = ARP)
     axis_arb_mux #(
         .DATA_WIDTH(8),
         .S_COUNT(2),
@@ -341,11 +364,11 @@ module fpga_top (
         .m_axis_tlast(tx_axis_tlast),
         .m_axis_tready(tx_axis_tready),
         
-        // Inputs: Port 0 = ARP (converted to stream), Port 1 = ICMP (native stream)
-        .s_axis_tdata({icmp_tx_data, arp_tx_axis_tdata}),
-        .s_axis_tvalid({icmp_tx_valid, arp_tx_axis_tvalid}),
-        .s_axis_tlast({icmp_tx_last, arp_tx_axis_tlast}),
-        .s_axis_tready({icmp_tx_ready, arp_tx_axis_tready}),
+        // Inputs: Port 0 = UDP, Port 1 = ARP
+        .s_axis_tdata({udp_tx_data, arp_tx_axis_tdata}),
+        .s_axis_tvalid({udp_tx_valid, arp_tx_axis_tvalid}),
+        .s_axis_tlast({udp_tx_last, arp_tx_axis_tlast}),
+        .s_axis_tready({udp_tx_ready, arp_tx_axis_tready}),
         
         // Unused sideband signals
         .s_axis_tkeep(2'b11), // [FIX] Connect Keep
@@ -366,7 +389,7 @@ module fpga_top (
     
     reg [23:0] ping_stretch_cnt;
     always @(posedge clk_125m) begin
-        if (ping_pulse) ping_stretch_cnt <= {24{1'b1}};
+        if (udp_pulse) ping_stretch_cnt <= {24{1'b1}};
         else if (ping_stretch_cnt > 0) ping_stretch_cnt <= ping_stretch_cnt - 1;
     end
 
@@ -382,15 +405,21 @@ module fpga_top (
     ila_0 my_ila (
         .clk(clk_125m), 
         
-        // RX Side (Verify Reception)
-        .probe0(rx_axis_tdata),     // 8 bits
-        .probe1(rx_axis_tvalid),    // 1 bit
+        // SLOT 0: RX Interface (What are we receiving?)
+        .probe0(rx_axis_tdata),      // [7:0]
+        .probe1(rx_axis_tvalid),     // [0:0]
+        .probe2(rx_axis_tlast),      // [0:0] <-- Added
         
-        // TX Side (Verify Transmission)
-        .probe2(tx_axis_tdata),     // 8 bits
-        .probe3(tx_axis_tvalid),    // 1 bit 
-        .probe4(tx_axis_tready),    // 1 bit
-        .probe5(eth_mmcm_locked)    // 1 bit [FIX: Monitor PLL Lock instead of TX_EN]
+        // SLOT 1: TX Interface (What are we sending?)
+        .probe3(tx_axis_tdata),      // [7:0]
+        .probe4(tx_axis_tvalid),     // [0:0]
+        .probe5(tx_axis_tlast),      // [0:0] <-- Added
+        .probe6(tx_axis_tready),     // [0:0] 
+        
+        // SLOT 2: Internals & Status
+        .probe7(udp_tx_valid),       // [0:0] <-- Tells us "It was ME who sent that!"
+        .probe8(status_link_up),     // [0:0] <-- Cable status
+        .probe9(eth_mmcm_locked)     // [0:0] <-- Clock status
     );
 
 endmodule
