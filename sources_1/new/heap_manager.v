@@ -48,6 +48,8 @@ module heap_manager (
     
     // Update State (Partial Fill)
     localparam UPDATE_WRITE     = 17;
+    
+    localparam RESET_BRAM       = 19; 
 
     localparam FINISH           = 18;
 
@@ -120,18 +122,33 @@ module heap_manager (
     // --- Main Sequential Logic ---
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state <= IDLE;
+            state <= RESET_BRAM;
             count <= 0;
             full <= 0;
             empty <= 1;
-            busy <= 0;
+            busy <= 1;
             done <= 0;
             we <= 0;
             // Initialize root_out to 0 or Max depending on type? 
             // For safety, 0. Logic relies on 'empty' flag.
             root_out <= 0; 
+            curr_idx <= 0; // Use as reset counter
         end else begin
             case (state)
+                RESET_BRAM: begin
+                    we <= 1;
+                    wdata <= 32'd0;
+                    addr <= curr_idx;
+                    
+                    if (curr_idx == 1023) begin // Reset all 1024 entries
+                        state <= IDLE;
+                        busy <= 0;
+                        we <= 0;
+                        curr_idx <= 0;
+                    end else begin
+                        curr_idx <= curr_idx + 1;
+                    end
+                end
                 IDLE: begin
                     done <= 0;
                     we <= 0;
