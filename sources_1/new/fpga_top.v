@@ -252,7 +252,7 @@ module fpga_top (
     );
 
     // ARP Configuration
-    localparam TARGET_IP  = {8'd192, 8'd168, 8'd1, 8'd128};
+    localparam TARGET_IP  = {8'd192, 8'd168, 8'd1, 8'd50};
     localparam TARGET_MAC = 48'h02_00_00_00_00_00;
 
     // The ARP Core
@@ -326,28 +326,36 @@ module fpga_top (
 //        .ping_detect(ping_pulse)
 //    );
 
+//    wire [7:0] udp_tx_data;
+//    wire       udp_tx_valid, udp_tx_last, udp_tx_ready;
+//    wire       udp_pulse;
+    
+//    udp_hardcoded_echo udp_inst (
+//        .clk(clk_125m),
+//        .rst(rst_125m),
+        
+//        // RX Input
+//        .s_axis_tdata(rx_axis_tdata),    
+//        .s_axis_tvalid(rx_axis_tvalid),
+//        .s_axis_tlast(rx_axis_tlast),
+//        .s_axis_tready(), // Open or connected to logic if needed
+        
+//        // TX Output
+//        .m_axis_tdata(udp_tx_data),
+//        .m_axis_tvalid(udp_tx_valid),
+//        .m_axis_tlast(udp_tx_last),
+//        .m_axis_tready(udp_tx_ready)
+//    );
+
+//    assign udp_pulse = udp_tx_valid;
+
+    wire [7:0] ret_fifo_tdata;
+    wire       ret_fifo_tvalid;
+    wire       ret_fifo_tready;
+    
+    // Wires for UDP TX Engine Output -> Arbiter
     wire [7:0] udp_tx_data;
     wire       udp_tx_valid, udp_tx_last, udp_tx_ready;
-    wire       udp_pulse;
-    
-    udp_hardcoded_echo udp_inst (
-        .clk(clk_125m),
-        .rst(rst_125m),
-        
-        // RX Input
-        .s_axis_tdata(rx_axis_tdata),    
-        .s_axis_tvalid(rx_axis_tvalid),
-        .s_axis_tlast(rx_axis_tlast),
-        .s_axis_tready(), // Open or connected to logic if needed
-        
-        // TX Output
-        .m_axis_tdata(udp_tx_data),
-        .m_axis_tvalid(udp_tx_valid),
-        .m_axis_tlast(udp_tx_last),
-        .m_axis_tready(udp_tx_ready)
-    );
-
-    assign udp_pulse = udp_tx_valid;
     
     wire [31:0] trade_info;
     wire        trade_valid;
@@ -369,6 +377,11 @@ module fpga_top (
         .rx_axis_tvalid(rx_axis_tvalid),
         .rx_axis_tlast(rx_axis_tlast),
 
+        // Return Path Output (To UDP TX Engine)
+        .tx_fifo_tdata(ret_fifo_tdata),
+        .tx_fifo_tvalid(ret_fifo_tvalid),
+        .tx_fifo_tready(ret_fifo_tready),
+
         // Outputs (Map these to ILA or top level pins if available)
         .trade_info(trade_info),
         .trade_valid(trade_valid),
@@ -376,9 +389,26 @@ module fpga_top (
         .leds(), // Physical LEDs can stay connected if you want
         
         // Connect Debug Ports
-        .debug_ob_data(debug_ob_data),
-        .debug_fifo_empty(debug_fifo_empty),
-        .debug_fifo_full(debug_fifo_full)
+        .debug_ob_data(debug_ob_data)
+//        .debug_fifo_empty(),
+//        .debug_fifo_full()
+    );
+    
+    // B. The UDP Transmitter (Generator)
+    udp_tx_engine udp_gen_inst (
+        .clk(clk_125m),
+        .rst(rst_125m),
+        
+        // Read from Return FIFO
+        .s_fifo_tdata(ret_fifo_tdata),
+        .s_fifo_tvalid(ret_fifo_tvalid),
+        .s_fifo_tready(ret_fifo_tready),
+        
+        // Output to MAC Arbiter
+        .m_axis_tdata(udp_tx_data),
+        .m_axis_tvalid(udp_tx_valid),
+        .m_axis_tlast(udp_tx_last),
+        .m_axis_tready(udp_tx_ready)
     );
 
     // AXI Stream Arbiter (Port 0 = UDP, Port 1 = ARP)
@@ -421,7 +451,7 @@ module fpga_top (
     
     reg [23:0] ping_stretch_cnt;
     always @(posedge clk_125m) begin
-        if (udp_pulse) ping_stretch_cnt <= {24{1'b1}};
+        if (engine_busy) ping_stretch_cnt <= {24{1'b1}};
         else if (ping_stretch_cnt > 0) ping_stretch_cnt <= ping_stretch_cnt - 1;
     end
 
@@ -447,17 +477,18 @@ module fpga_top (
         // SLOT 1: UDP TX (The Echo Reply)
         .probe3(tx_axis_tdata),      // [7:0]
         .probe4(tx_axis_tvalid),     // [0:0]
-        .probe5(udp_pulse),          // [0:0] (Did UDP Engine reply?)
+        .probe5(udp_tx_valid),          // [0:0] (Did UDP Engine reply?)
         
         // SLOT 2: ORDER BOOK INPUT (What did the FIFO deliver?)
         .probe6(debug_ob_data),      // [31:0] <--- CRITICAL: Check Endianness here
         .probe7(debug_fifo_empty),   // [0:0]
-        .probe8(debug_fifo_full),    // [0:0]
+        .probe8(ret_fifo_tvalid),    // [0:0]
         
         // SLOT 3: ORDER BOOK OUTPUT (Did we trade?)
         .probe9(trade_info),         // [31:0] <--- CRITICAL: See Trade Price/Qty
         .probe10(trade_valid),       // [0:0]  <--- Trigger on this!
-        .probe11(engine_busy)        // [0:0]
+        .probe11(engine_busy),        // [0:0]
+        .probe12(udp_tx_last)
     );
 
 endmodule
