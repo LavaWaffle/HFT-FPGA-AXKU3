@@ -40,52 +40,45 @@ module order_book_top (
     // =========================================================================
     
     // --- Bid Side Wire Intercepts ---
-    // We separate "Heap" signals from "RAM" signals so we can MUX them
     wire [1:0]  bid_cmd;
     wire [31:0] bid_data_to_heap;
     wire [31:0] bid_root;
     wire        bid_empty, bid_full, bid_done;
+    wire [9:0]  bid_count; // [NEW] Connected for optimization
     
     wire        heap_bid_we;
     wire [9:0]  heap_bid_addr;
     wire [31:0] heap_bid_wdata;
-    wire [31:0] bid_ram_rdata; // Common read data
+    wire [31:0] bid_ram_rdata; 
 
     // --- Ask Side Wire Intercepts ---
     wire [1:0]  ask_cmd;
     wire [31:0] ask_data_to_heap;
     wire [31:0] ask_root;
     wire        ask_empty, ask_full, ask_done;
+    wire [9:0]  ask_count; // [NEW] Connected for optimization
 
     wire        heap_ask_we;
     wire [9:0]  heap_ask_addr;
     wire [31:0] heap_ask_wdata;
-    wire [31:0] ask_ram_rdata; // Common read data
+    wire [31:0] ask_ram_rdata; 
 
     matching_engine u_engine (
         .clk            (clk),
         .rst_n          (rst_n),
-        
-        // Input
-        .input_valid    (input_valid && !dumping_active), // Block inputs during dump
+        .input_valid    (input_valid && !dumping_active), 
         .input_data     (input_data),
         .engine_busy    (internal_engine_busy),
-
-        // Bid Heap Interface
         .bid_root       (bid_root),
         .bid_empty      (bid_empty),
         .bid_done       (bid_done),
         .bid_cmd        (bid_cmd),
         .bid_data_out   (bid_data_to_heap),
-
-        // Ask Heap Interface
         .ask_root       (ask_root),
         .ask_empty      (ask_empty),
         .ask_done       (ask_done),
         .ask_cmd        (ask_cmd),
         .ask_data_out   (ask_data_to_heap),
-
-        // Output (Renamed to allow Muxing)
         .trade_valid    (engine_out_valid),
         .trade_info     (engine_out_data)
     );
@@ -101,13 +94,11 @@ module order_book_top (
         .cmd        (bid_cmd),
         .data_in    (bid_data_to_heap),
         .root_out   (bid_root),
-        .count      (), 
+        .count      (bid_count), // [FIX] Wiring this up
         .full       (bid_full),
         .empty      (bid_empty),
         .busy       (), 
         .done       (bid_done),
-        
-        // Connect to HEAP wires (not RAM yet)
         .we         (heap_bid_we),
         .addr       (heap_bid_addr),
         .wdata      (heap_bid_wdata),
@@ -115,7 +106,6 @@ module order_book_top (
     );
 
     // --- BID BRAM MUX ---
-    // If dumping, FSM controls addr. Write is disabled.
     wire [9:0]  bid_ram_addr  = dumping_active ? dump_addr : heap_bid_addr;
     wire        bid_ram_we    = dumping_active ? 1'b0      : heap_bid_we;
     wire [31:0] bid_ram_wdata = dumping_active ? 32'd0     : heap_bid_wdata;
@@ -139,13 +129,11 @@ module order_book_top (
         .cmd        (ask_cmd),
         .data_in    (ask_data_to_heap),
         .root_out   (ask_root),
-        .count      (),
+        .count      (ask_count), // [FIX] Wiring this up
         .full       (ask_full),
         .empty      (ask_empty),
         .busy       (),
         .done       (ask_done),
-        
-        // Connect to HEAP wires
         .we         (heap_ask_we),
         .addr       (heap_ask_addr),
         .wdata      (heap_ask_wdata),
@@ -166,18 +154,20 @@ module order_book_top (
     );
 
     // =========================================================================
-    // 4. DUMP LOGIC FSM
+    // 4. DUMP LOGIC FSM (Optimized)
     // =========================================================================
-    // This state machine hijacks the BRAMs to stream data out via UDP
+    // Scans only valid items (1 to Count). Skips 0 to 1024 scan.
     
-    localparam S_IDLE       = 0;
-    localparam S_WAIT_BUSY  = 1;
-    localparam S_DUMP_BIDS  = 2;
-    localparam S_DUMP_ASKS  = 3;
-    localparam RAM_DEPTH    = 1024; // Assuming 10-bit address
+    localparam S_IDLE        = 0;
+    localparam S_WAIT_BUSY   = 1;
+    localparam S_DUMP_BIDS   = 2;
+    localparam S_FLUSH_BIDS  = 3; // Catch the last Bid item
+    localparam S_DUMP_ASKS   = 4;
+    localparam S_FLUSH_ASKS  = 5; // Catch the last Ask item
+    localparam S_FINISH_DUMP = 6;
 
     reg [2:0] state;
-    reg       ram_read_valid; // Pipeline delay for BRAM read
+    reg       ram_read_valid; 
 
     always @(posedge clk) begin
         if (!rst_n) begin
@@ -190,7 +180,7 @@ module order_book_top (
         end else begin
             // Default
             dump_out_valid <= 0;
-            ram_read_valid <= 0; // Default off unless in read loop
+            ram_read_valid <= 0; 
 
             case (state)
                 S_IDLE: begin
@@ -202,70 +192,96 @@ module order_book_top (
                 end
 
                 S_WAIT_BUSY: begin
-                    // Wait for any current trade to finish so BRAMs are stable
                     if (!internal_engine_busy) begin
-                        dumping_active <= 1; // Seize control of BRAMs
-                        state <= S_DUMP_BIDS;
-                        dump_addr <= 0;
+                        dumping_active <= 1; 
+                        
+                        // Optimization: If Bids exist, start dumping. Else check Asks.
+                        if (bid_count > 0) begin
+                            dump_addr <= 1; // Heap starts at 1
+                            state <= S_DUMP_BIDS;
+                        end else if (ask_count > 0) begin
+                            dump_addr <= 1;
+                            state <= S_DUMP_ASKS;
+                        end else begin
+                            // Both empty
+                            dumping_active <= 0;
+                            state <= S_IDLE;
+                        end
                     end
                 end
 
                 S_DUMP_BIDS: begin
-                    // 1. Read Cycle: Address is set (dump_addr)
-                    // 2. Data comes out next cycle (bid_ram_rdata)
+                    ram_read_valid <= 1; // Pipeline active
                     
-                    // Simple Pipelined Read
-                    ram_read_valid <= 1; // Mark that next cycle has valid data
-                    
-                    // Capture Data from Previous Cycle
-                    if (ram_read_valid) begin
-                        // Filter: Only send non-zero entries (valid orders)
-                        if (bid_ram_rdata != 32'd0) begin
-                            dump_out_valid <= 1;
-                            dump_out_data  <= bid_ram_rdata;
-                        end
+                    // Output Data from PREVIOUS cycle
+                    if (ram_read_valid && bid_ram_rdata != 32'd0) begin
+                        dump_out_valid <= 1;
+                        dump_out_data  <= bid_ram_rdata;
                     end
 
-                    // Increment / Next State
-                    if (dump_addr == RAM_DEPTH - 1) begin
-                        dump_addr <= 0;
-                        ram_read_valid <= 0; // Clear pipe for switch
-                        state <= S_DUMP_ASKS;
+                    // Address Logic
+                    if (dump_addr == bid_count) begin
+                        // We just requested the last item.
+                        // It will arrive next cycle. Go to Flush.
+                        state <= S_FLUSH_BIDS;
                     end else begin
                         dump_addr <= dump_addr + 1;
+                    end
+                end
+                
+                S_FLUSH_BIDS: begin
+                    // Capture the final item from the pipeline
+                    if (bid_ram_rdata != 32'd0) begin
+                        dump_out_valid <= 1;
+                        dump_out_data  <= bid_ram_rdata;
+                    end
+                    
+                    // Transition to Asks
+                    if (ask_count > 0) begin
+                        dump_addr <= 1;
+                        state <= S_DUMP_ASKS;
+                    end else begin
+//                        dumping_active <= 0;
+                        state <= S_FINISH_DUMP;
                     end
                 end
 
                 S_DUMP_ASKS: begin
                     ram_read_valid <= 1;
                     
-                    if (ram_read_valid) begin
-                        if (ask_ram_rdata != 32'd0) begin
-                            dump_out_valid <= 1;
-                            dump_out_data  <= ask_ram_rdata;
-                        end
+                    if (ram_read_valid && ask_ram_rdata != 32'd0) begin
+                        dump_out_valid <= 1;
+                        dump_out_data  <= ask_ram_rdata;
                     end
 
-                    if (dump_addr == RAM_DEPTH - 1) begin
-                        dumping_active <= 0; // Release BRAMs
-                        state <= S_IDLE;
+                    if (dump_addr == ask_count) begin
+                        state <= S_FLUSH_ASKS;
                     end else begin
                         dump_addr <= dump_addr + 1;
                     end
+                end
+                
+                S_FLUSH_ASKS: begin
+                    if (ask_ram_rdata != 32'd0) begin
+                        dump_out_valid <= 1;
+                        dump_out_data  <= ask_ram_rdata;
+                    end
+                    
+//                    dumping_active <= 0;
+                    state <= S_FINISH_DUMP;
+                end
+                
+                S_FINISH_DUMP: begin
+                     dumping_active <= 0; // Now it is safe to switch the Mux
+                     state <= S_IDLE;
                 end
             endcase
         end
     end
 
-    // =========================================================================
-    // 5. OUTPUT MUX & Debug
-    // =========================================================================
-    
-    // If dumping, we output the Dump Stream. Otherwise, normal Trade Reports.
+    // Output Mux
     assign trade_valid = dumping_active ? dump_out_valid : engine_out_valid;
     assign trade_info  = dumping_active ? dump_out_data  : engine_out_data;
-    
-    // Busy logic: We are busy if Engine is thinking OR if we are dumping
     assign engine_busy = internal_engine_busy || dumping_active;
 
     assign leds = {ask_full, bid_full, ask_empty, bid_empty};

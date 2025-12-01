@@ -228,6 +228,11 @@ module heap_manager (
                     // rdata is the Last Element.
                     holding_reg <= rdata; // We must sink this node down
                     
+                    // Clean up
+                    we    <= 1;
+                    addr  <= count;
+                    wdata <= 32'd0;
+                    
                     // Decrease count
                     count <= count - 1;
                     if (count == 1) begin

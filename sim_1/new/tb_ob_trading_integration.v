@@ -1,37 +1,50 @@
 `timescale 1ns / 1ps
-`include "order_defines.v"
-// Define macros locally in case order_defines.v is missing from this file scope
+
+// Define macros locally
 `ifndef PRICE
     `define PRICE(x) x[31:16]
+    `define IS_BUY(x) x[15]
     `define QTY(x)   x[13:0]
 `endif
 
 module tb_ob_trading_integration;
 
     // =================================================================
-    // 1. Signals
+    // 1. Signals & Constants
     // =================================================================
-    // UDP Domain (125 MHz)
-    reg        clk_udp = 0;
-    reg        rst_udp = 1;
-    reg [7:0]  rx_axis_tdata = 0;
-    reg        rx_axis_tvalid = 0;
-    reg        rx_axis_tlast = 0;
+    reg         clk_udp = 0;
+    reg         rst_udp = 1;
+    reg [7:0]   rx_axis_tdata = 0;
+    reg         rx_axis_tvalid = 0;
+    reg         rx_axis_tlast = 0;
 
-    // Engine Domain (200 MHz)
-    reg        clk_engine = 0;
-    reg        rst_engine = 1;
+    reg         clk_engine = 0;
+    reg         rst_engine = 1;
     
-    // Outputs
+    wire [7:0]  tx_fifo_tdata;
+    wire        tx_fifo_tvalid;
+    reg         tx_fifo_tready = 0;
+
     wire [31:0] trade_info;
     wire        trade_valid;
     wire        engine_busy;
     wire [3:0]  leds;
+    wire [31:0] debug_ob_data;
+
+    // Filter Constants
+    localparam [31:0] DEST_IP  = {8'd192, 8'd168, 8'd1, 8'd50}; 
+    localparam [15:0] SRC_PORT = 16'd55555;                     
+    
+    localparam [23:0] OP_MARKET = 24'h102030;
+    localparam [23:0] OP_DUMP   = 24'hF0E0D0;
+
+    // GLOBAL BUFFER for Packet Generation
+    // Increased size for stress testing
+    reg [31:0] order_batch [0:31]; 
 
     // =================================================================
-    // 2. Instantiate the System Wrapper
+    // 2. Instantiate System
     // =================================================================
-    // This wrapper contains: Payload Extractor -> FIFO -> Your Real Order Book
     trading_system_top uut (
         .clk_udp(clk_udp),
         .rst_udp(rst_udp),
@@ -40,180 +53,222 @@ module tb_ob_trading_integration;
         .rx_axis_tdata(rx_axis_tdata),
         .rx_axis_tvalid(rx_axis_tvalid),
         .rx_axis_tlast(rx_axis_tlast),
+        .tx_fifo_tdata(tx_fifo_tdata),
+        .tx_fifo_tvalid(tx_fifo_tvalid),
+        .tx_fifo_tready(tx_fifo_tready),
         .trade_info(trade_info),
         .trade_valid(trade_valid),
         .engine_busy(engine_busy),
-        .leds(leds)
+        .leds(leds),
+        .debug_ob_data(debug_ob_data)
     );
 
     // =================================================================
     // 3. Clock Generation
     // =================================================================
-    always #4.0 clk_udp    = ~clk_udp;    // 125 MHz
-    always #2.5 clk_engine = ~clk_engine; // 200 MHz
+    always #4.0 clk_udp    = ~clk_udp;    // 125 MHz 
+    always #2.5 clk_engine = ~clk_engine; // 200 MHz 
 
     // =================================================================
-    // 4. Helper Tasks
+    // 4. Tasks
     // =================================================================
     
-    // Low-level UDP Byte sender
-    task send_byte(input [7:0] data);
+    task send_byte;
+        input [7:0] data;
+        input is_last;
         begin
             @(posedge clk_udp);
-            rx_axis_tvalid <= 1;
             rx_axis_tdata  <= data;
-            rx_axis_tlast  <= 0;
+            rx_axis_tvalid <= 1;
+            rx_axis_tlast  <= is_last;
         end
     endtask
 
-    // Constructs the UDP packet (Header + Payload)
-    task send_packet(input [31:0] order_data);
-        integer i;
+    // Task to send UDP Frame
+    task send_udp_frame;
+        input [23:0] opcode;
+        input integer count; 
+        
+        integer i, k;
+        reg [7:0] current_byte;
+        reg [31:0] current_order;
         begin
-            // 1. Send Header Garbage (42 Bytes) - Simulates MAC/IP/UDP headers
-            for (i=0; i<42; i=i+1) send_byte(8'hAA); 
+            // 1. HEADER (Bytes 0-41)
+            for (i = 0; i < 42; i = i + 1) begin
+                case(i)
+                    12: current_byte = 8'h08;
+                    13: current_byte = 8'h00;
+                    23: current_byte = 8'h11;
+                    30: current_byte = DEST_IP[31:24];
+                    31: current_byte = DEST_IP[23:16];
+                    32: current_byte = DEST_IP[15:8];
+                    33: current_byte = DEST_IP[7:0];
+                    34: current_byte = SRC_PORT[15:8];
+                    35: current_byte = SRC_PORT[7:0];
+                    default: current_byte = 8'hAA; 
+                endcase
+                send_byte(current_byte, 0);
+            end
 
-            // 2. Send Payload (4 Bytes) - BIG ENDIAN (Network Order)
-            // We send MSB first. The Wrapper will swap this back to Little Endian for your Order Book.
-            send_byte(order_data[31:24]); 
-            send_byte(order_data[23:16]); 
-            send_byte(order_data[15:8]);  
-            
-            // Last Byte with TLAST
-            @(posedge clk_udp);
-            rx_axis_tdata  <= order_data[7:0]; 
-            rx_axis_tlast  <= 1;
-            
+            // 2. OPCODE (Bytes 42-44)
+            send_byte(opcode[23:16], 0);
+            send_byte(opcode[15:8],  0);
+            send_byte(opcode[7:0],   0);
+
+            // 3. PAYLOAD (Orders)
+            if (count == 0) begin
+                // Dump command (Empty payload), send padding + TLAST
+                send_byte(8'h00, 1);
+            end else begin
+                for (k = 0; k < count; k = k + 1) begin
+                    current_order = order_batch[k];
+                    
+                    // Send 32-bit Order
+                    send_byte(current_order[31:24], 0);
+                    send_byte(current_order[23:16], 0);
+                    send_byte(current_order[15:8],  0);
+                    
+                    // Last byte check
+                    if (k == count - 1) begin
+                        send_byte(current_order[7:0], 1); // TLAST
+                    end else begin
+                        send_byte(current_order[7:0], 0);
+                    end
+                end
+            end
+
+            // Cleanup
             @(posedge clk_udp);
             rx_axis_tvalid <= 0;
             rx_axis_tlast  <= 0;
             rx_axis_tdata  <= 0;
             
-            // 3. Wait for FIFO Transit
-            // It takes a few cycles for data to cross from UDP clock to Engine clock
-            repeat(40) @(posedge clk_engine);
+            repeat(50) @(posedge clk_udp);
         end
     endtask
 
-    // HIGH LEVEL: Submit Order via UDP
-    task submit_order_udp;
-        input is_buy;        // 1 bit
-        input [15:0] price;  // 16 bits
-        input [13:0] qty;    // 14 bits
-        input is_bot;        // 1 bit
-        reg [31:0] payload;
+    // Helper function to pack bits
+    function [31:0] pack_order;
+        input [15:0] price;
+        input is_buy;
+        input is_bot;
+        input [13:0] qty;
         begin
-            // Pack the data: Price | Buy | Bot | Qty
-            payload = {price, is_buy, is_bot, qty};
-            
-            // Send it over the "Network"
-            send_packet(payload);
-            
-            // Wait logic: If engine becomes busy, wait for it to finish
-            // Note: We access the internal signal via hierarchy if needed, 
-            // or use the top-level 'engine_busy' output.
-            while (engine_busy) @(posedge clk_engine);
+            pack_order = {price, is_buy, is_bot, qty};
         end
-    endtask
+    endfunction
 
-    // PEEK TASK: Looks inside your Real Order Book
-    task dump_book_tops;
-        begin
-            $display("--- BOOK STATUS (Peeking Internal State) ---");
-            
-            // HIERARCHICAL REFERENCE: uut (Wrapper) -> ob_inst (Order Book Instance) -> u_bid_heap
-            if (uut.ob_inst.u_bid_heap.empty) 
-                $display("BID: [EMPTY]");
-            else 
-                $display("BID: Top Price %0d, Qty %0d", 
-                         `PRICE(uut.ob_inst.u_bid_heap.root_out), 
-                         `QTY(uut.ob_inst.u_bid_heap.root_out));
-
-            if (uut.ob_inst.u_ask_heap.empty) 
-                $display("ASK: [EMPTY]");
-            else 
-                $display("ASK: Top Price %0d, Qty %0d", 
-                         `PRICE(uut.ob_inst.u_ask_heap.root_out), 
-                         `QTY(uut.ob_inst.u_ask_heap.root_out));
-            $display("-------------------");
+    // =================================================================
+    // 5. Monitors
+    // =================================================================
+    
+    // UDP TX Monitor (Dumps)
+    initial begin
+        tx_fifo_tready = 1; 
+        forever begin
+            @(posedge clk_udp);
+            if (tx_fifo_tvalid) begin
+                // Just printing raw bytes. In waveform, group these by 4.
+                $display("[%0t] UDP TX OUT (Byte): %h", $time, tx_fifo_tdata);
+            end
         end
-    endtask
+    end
 
-    // Monitor Trades from Top Level
+    // Trade Execution Monitor
     always @(posedge clk_engine) begin
         if (trade_valid) begin
-            $display("[%0t] >>> TRADE EXECUTED: Price %0d, Qty %0d <<<", 
+            $display("[%0t] >>> TRADE EXEC: Price %0d, Qty %0d <<<", 
                      $time, `PRICE(trade_info), `QTY(trade_info));
         end
     end
 
     // =================================================================
-    // 5. Main Test Sequence (Mirrors your standalone test)
+    // 6. Main Stress Test Sequence
     // =================================================================
     initial begin
-        $display("=== SYSTEM INTEGRATION START ===");
+        $display("=== HARDER ORDER BOOK STRESS TEST ===");
         
         // Reset
+        rst_udp = 1; rst_engine = 1;
         #100;
-        rst_udp = 0;
-        rst_engine = 0; // The wrapper inverts this for the order book
+        rst_udp = 0; rst_engine = 0;
         #100;
 
-        // ------------------------------------------------------------
-        // SCENARIO 1: Populate the ASK Book (Sellers) via UDP
-        // ------------------------------------------------------------
-        $display("\n[TEST] Adding Sellers (Asks) via UDP...");
-        submit_order_udp(0, 105, 50, 1); // Sell @ 105
-        submit_order_udp(0, 102, 20, 1); // Sell @ 102
-        submit_order_udp(0, 108, 10, 1); // Sell @ 108
-        submit_order_udp(0, 100, 30, 1); // Sell @ 100 (Best)
+        // ----------------------------------------------------------------
+        // PHASE 1: FRAGMENTATION (Complex Insertions)
+        // ----------------------------------------------------------------
+        // We will insert orders out of price sequence to test Heap Sifting.
+        // We will also insert duplicate prices to test non-merging logic.
+        $display("\n[TEST 1] Building Fragmentation (Sellers)...");
         
-        #500; // Allow time for processing
-        dump_book_tops(); 
-        // Expected: ASK Top = 100
+        // Order 1: Sell 10 @ 105 (Root)
+        order_batch[0] = pack_order(105, 0, 0, 10);
+        
+        // Order 2: Sell 10 @ 102 (New Root, 105 pushes down)
+        order_batch[1] = pack_order(102, 0, 0, 10);
+        
+        // Order 3: Sell 10 @ 100 (New Root, 102 pushes down)
+        order_batch[2] = pack_order(100, 0, 0, 10);
+        
+        // Order 4: Sell 10 @ 102 (Duplicate Price! Should NOT merge because root is 100)
+        order_batch[3] = pack_order(102, 0, 0, 10); 
+        
+        // Order 5: Sell 20 @ 100 (Matches Root! Should MERGE -> Root Qty becomes 30)
+        order_batch[4] = pack_order(100, 0, 0, 20);
+        
+        // Order 6: Buy 55 @ 102 
+        order_batch[5] = pack_order(102, 1, 0, 55);
 
-        // ------------------------------------------------------------
-        // SCENARIO 2: Populate the BID Book (Buyers) via UDP
-        // ------------------------------------------------------------
-        $display("\n[TEST] Adding Buyers (Bids) via UDP...");
-        submit_order_udp(1, 90, 100, 1); 
-        submit_order_udp(1, 95, 50,  1); // Buy @ 95 (Best)
-        submit_order_udp(1, 92, 20,  1); 
-        
-        #500;
-        dump_book_tops();
-        // Expected: BID Top = 95
+        // Send all 5 orders in one burst
+        send_udp_frame(OP_MARKET, 6);
 
-        // ------------------------------------------------------------
-        // SCENARIO 3: NO MATCH
-        // ------------------------------------------------------------
-        $display("\n[TEST] Buy @ 98 (Should not match Ask @ 100)...");
-        submit_order_udp(1, 98, 10, 1);
-        
-        #500;
-        dump_book_tops();
-        // Expected: BID Top = 98
+        #10000; // Wait for heap to settle (5 insertions takes time)
 
-        // ------------------------------------------------------------
-        // SCENARIO 4: PARTIAL FILL
-        // ------------------------------------------------------------
-        $display("\n[TEST] Buy 10 @ 100 (Matches Ask @ 100)...");
-        submit_order_udp(1, 100, 10, 1);
+        // ----------------------------------------------------------------
+        // PHASE 2: VERIFY DUMP (Optimized Count)
+        // ----------------------------------------------------------------
+        // Expected State:
+        // 1. Price 100, Qty 30 (Merged)
+        // 2. Price 102, Qty 10
+        // 3. Price 105, Qty 10
+        // 4. Price 102, Qty 10 (Duplicate)
+        // Total Count in Heap = 4 nodes.
+        // Total Packets transmitted should be exactly 4 (plus headers).
         
-        #500;
-        dump_book_tops();
-        // Expected: ASK Top = 100, Qty 20 left.
+        $display("\n[TEST 2] Dumping Book (Expect 4 Orders)...");
+        send_udp_frame(OP_DUMP, 0);
+        
+        #3000;
 
-        // ------------------------------------------------------------
-        // SCENARIO 6: THE SWEEP (Massive Buy)
-        // ------------------------------------------------------------
-        $display("\n[TEST] Massive Buy 100 @ 110 (Sweeps 102, 105, 108)...");
-        submit_order_udp(1, 110, 100, 1);
+        // ----------------------------------------------------------------
+        // PHASE 3: THE SWEEP (Verify Priority Execution)
+        // ----------------------------------------------------------------
+        // We buy 45 units.
+        // Should eat:
+        // 1. 100 @ 30 (Best Price)
+        // 2. 102 @ 10 (Next Best)
+        // 3. 102 @  5 (From the duplicate node)
+        // Remaining 5 on duplicate node stays in book. 105 stays in book.
         
-        #2000; // Needs more time for multiple trades
-        dump_book_tops();
+        $display("\n[TEST 3] Sweeping Book (Buy 45 @ 110)...");
         
-        $display("=== INTEGRATION TEST COMPLETE ===");
+        order_batch[0] = pack_order(110, 1, 0, 45); 
+        send_udp_frame(OP_MARKET, 1);
+        
+        #2000;
+        
+        // ----------------------------------------------------------------
+        // PHASE 4: FINAL STATE CHECK
+        // ----------------------------------------------------------------
+        // Remaining Book should have:
+        // 1. Price 102, Qty 5 (Remainder of duplicate)
+        // 2. Price 105, Qty 10
+        
+        $display("\n[TEST 4] Final Dump (Expect 102@5 and 105@10)...");
+        send_udp_frame(OP_DUMP, 0);
+
+        #2000;
+        $display("=== TEST COMPLETE ===");
         $finish;
     end
 

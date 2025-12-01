@@ -115,17 +115,46 @@ module tb_order_book;
         #20;
 
         // ------------------------------------------------------------
-        // SCENARIO 1: Populate the ASK Book (Sellers)
+        // SCENARIO 1: Populate the ASK Book
         // ------------------------------------------------------------
         $display("\n[TEST] Adding Sellers (Asks)...");
-        // We add them OUT OF ORDER to test Min-Heap "Bubble Up"
-        submit_order(0, 105, 50, 1); // Sell @ 105
-        submit_order(0, 102, 20, 1); // Sell @ 102 (New Best)
-        submit_order(0, 108, 10, 1); // Sell @ 108
-        submit_order(0, 100, 30, 1); // Sell @ 100 (New Best)
+        
+        // 1. Add Base Order
+        submit_order(0, 102, 50, 1); // Ask @ 102 (Root)
+        
+        // 2. Add Matching Price (Should MERGE because it matches Root)
+        submit_order(0, 102, 20, 1); // Ask @ 102 -> Root becomes 70
+        
+        // 3. Add Better Price (New Root)
+        submit_order(0, 100, 10, 1); // Ask @ 100 -> New Root is 100 (Qty 10)
+        
+        // 4. Add Old Price (Cannot Merge because 102 is no longer Root)
+        // This will create a secondary node at 102.
+        submit_order(0, 102, 30, 1); 
         
         dump_book_tops();
-        // Expected: ASK Top = 100, Qty 30
+        // EXPECTED RESULT:
+        // Root should be Price 100, Qty 10.
+        // (The 102s are hidden behind the 100)
+        
+        // ------------------------------------------------------------
+        // SCENARIO 1.5: Verify Liquidity via Execution
+        // ------------------------------------------------------------
+        $display("\n[TEST] Sweeping Book to verify total liquidity...");
+        
+        // We expect:
+        // 1. Price 100, Qty 10
+        // 2. Price 102, Qty 70 (50+20 merged)
+        // 3. Price 102, Qty 30 (Separate node)
+        // Total to buy: 110
+        
+        submit_order(1, 105, 110, 2); // Buy 110 units @ 105 (Aggressive)
+        
+        // Watch the console logs. You should see:
+        // TRADE: Price 100, Qty 10
+        // TRADE: Price 102, Qty 70 (or 30, depending on heap sort stability)
+        // TRADE: Price 102, Qty 30 (or 70)
+        dump_book_tops();
 
         // ------------------------------------------------------------
         // SCENARIO 2: Populate the BID Book (Buyers)
