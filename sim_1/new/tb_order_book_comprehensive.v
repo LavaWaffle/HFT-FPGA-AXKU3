@@ -203,6 +203,7 @@ module tb_order_book_comprehensive;
         #100;
         rst_udp = 0; rst_engine = 0;
         #100;
+        #50000;
 
         // ----------------------------------------------------------------
         // TEST 1: ROUTING & BASIC POPULATION
