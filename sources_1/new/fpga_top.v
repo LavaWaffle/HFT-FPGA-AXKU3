@@ -18,6 +18,10 @@ module fpga_top (
     output wire       sfp_tx_p,
     output wire       sfp_tx_n,
     
+    // UART
+    input wire        uart_rx,
+    output wire       uart_tx,
+    
     // SFP Reference Clock (From FMC - 125MHz)
     input  wire       gt_refclk_p,
     input  wire       gt_refclk_n,
@@ -304,6 +308,21 @@ module fpga_top (
         .subnet_mask(32'hFFFFFF00),
         .clear_cache(1'b0)
     );
+    
+    // -------------------------------------------------------------------------
+    // 5. UART Receiver
+    // -------------------------------------------------------------------------
+    
+    // Receiver Signals (RX)
+    wire [7:0] uart_rx_data_out;
+    wire       uart_rx_data_valid;
+    
+    uart_receiver rx_inst (
+        .i_Clock     (clk_200m),
+        .i_Rx_Serial (uart_rx),
+        .o_Rx_DV     (uart_rx_data_valid),
+        .o_Rx_Byte   (uart_rx_data_out)
+    );
 
     // -------------------------------------------------------------------------
     // 5. UDP Echo Engine & AXI Stream Arbiter
@@ -357,6 +376,10 @@ module fpga_top (
     wire [7:0] udp_tx_data;
     wire       udp_tx_valid, udp_tx_last, udp_tx_ready;
     
+    // Wires for UART TX Engine Output
+    wire [7:0] uart_tx_data_in;
+    wire       uart_tx_valid, uart_tx_ready;
+    
     wire [31:0] trade_info;
     wire        trade_valid;
     wire        engine_busy;
@@ -376,11 +399,20 @@ module fpga_top (
         .rx_axis_tdata(rx_axis_tdata),
         .rx_axis_tvalid(rx_axis_tvalid),
         .rx_axis_tlast(rx_axis_tlast),
+        
+        // UART RX Stream
+        .uart_rx_data_out(uart_rx_data_out),
+        .uart_rx_data_valid(uart_rx_data_valid),
 
         // Return Path Output (To UDP TX Engine)
         .tx_fifo_tdata(ret_fifo_tdata),
         .tx_fifo_tvalid(ret_fifo_tvalid),
         .tx_fifo_tready(ret_fifo_tready),
+        
+        // UART TX Stream
+        .uart_tx_data_in(uart_tx_data_in),
+        .uart_tx_data_valid(uart_tx_valid),
+        .uart_tx_ready(uart_tx_ready),
 
         // Outputs (Map these to ILA or top level pins if available)
         .trade_info(trade_info),
@@ -409,6 +441,19 @@ module fpga_top (
         .m_axis_tvalid(udp_tx_valid),
         .m_axis_tlast(udp_tx_last),
         .m_axis_tready(udp_tx_ready)
+    );
+    
+    // C. The UART Transmitter (Generator)
+    uart_tx_channel uart_chan_inst (
+        .clk(clk_200m),
+        .rst(!rst_n),
+        
+        // Read from UART Return FIFO
+        .tx_data_in(uart_tx_data_in),
+        .tx_valid_in(uart_tx_valid),
+        .tx_ready_out(uart_tx_ready),
+        
+        .fpga_uart_tx(uart_tx)
     );
 
     // AXI Stream Arbiter (Port 0 = UDP, Port 1 = ARP)

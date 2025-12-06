@@ -42,6 +42,13 @@ set_property IOSTANDARD LVCMOS33 [get_ports {led[*]}]
 set_property PACKAGE_PIN J14 [get_ports rst_n]
 set_property IOSTANDARD LVCMOS33 [get_ports rst_n]
 
+# UART
+set_property PACKAGE_PIN AD15 [get_ports uart_tx]
+set_property IOSTANDARD LVCMOS33 [get_ports uart_tx]
+
+set_property PACKAGE_PIN AE15 [get_ports uart_rx]
+set_property IOSTANDARD LVCMOS33 [get_ports uart_rx]
+
 # ------------------------------------------------------------------------------
 # Timing Exceptions
 # ------------------------------------------------------------------------------

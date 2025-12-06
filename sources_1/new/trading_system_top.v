@@ -12,11 +12,20 @@ module trading_system_top (
     input  wire [7:0]  rx_axis_tdata,
     input  wire        rx_axis_tvalid,
     input  wire        rx_axis_tlast,
+    
+    // UART RX Stream (From Other Part, ex Spartan or Comp)
+    input  wire [7:0]  uart_rx_data_out,
+    input  wire        uart_rx_data_valid,        
 
     // UDP TX Interface (From Return FIFO to UDP TX Engine)
     output wire [7:0]  tx_fifo_tdata,
     output wire        tx_fifo_tvalid, // FIFO not empty
     input  wire        tx_fifo_tready, // UDP Engine Read Enable
+    
+    // UART Tx Interface (From UART Return FIFO to UART Transmitter)
+    output wire [7:0]  uart_tx_data_in,
+    output wire        uart_tx_data_valid,
+    input  wire        uart_tx_ready,
 
      // Outputs from Order Book (for debugging/LEDs)
     output wire [31:0] trade_info,
@@ -27,6 +36,17 @@ module trading_system_top (
     output wire        debug_input_fifo_empty,
     output wire        debug_input_fifo_full 
 );
+    wire uart_trigger_dump_raw;
+    // -------------------------------------------------------------------------
+    // 0. UART EXTRACTOR (200 MHz) - Now with Trigger Logic
+    // -------------------------------------------------------------------------
+    uart_payload_extractor uart_extractor_inst (
+        .clk(clk_engine),
+        .rst(rst_engine),
+        .uart_rx_data_out(uart_rx_data_out),
+        .uart_rx_data_valid(uart_rx_data_valid),
+        .trigger_dump(uart_trigger_dump_raw)
+    );
 
     // -------------------------------------------------------------------------
     // 1. EXTRACTOR (125 MHz) - Now with Trigger Logic
@@ -48,11 +68,17 @@ module trading_system_top (
         .trigger_dump(trigger_dump_raw)
     );
 
-    // Pulse Stretcher / Handshake for Trigger (125MHz -> 200MHz)
-    // For simplicity, we assume the pulse is long enough or captured via 
-    // a synchronizer in the Order Book. Ideally, use xpm_cdc_pulse.
-    // Here we just pass it; ensure your Order Book synchronizes 'start_dump'!
-    wire ob_start_dump = trigger_dump_raw; 
+    wire udp_trigger_synced; // Result of 125MHz -> 200MHz CDC Pulse
+    
+    xpm_cdc_pulse CDC_UDP_to_ENGINE (
+         .src_clk(clk_udp), .dest_clk(clk_engine),
+         .src_pulse(trigger_dump_raw), .dest_pulse(udp_trigger_synced)
+     );
+    
+    wire start_dump_command;
+
+    // Completely safe both at 200 Mhz
+    assign start_dump_command = udp_trigger_synced | uart_trigger_dump_raw; 
 
     // -------------------------------------------------------------------------
     // 2. INPUT FIFO (8-bit -> 32-bit, FWFT)
@@ -104,7 +130,7 @@ module trading_system_top (
         // Input
         .input_valid(ob_input_valid),
         .input_data(ob_input_data),
-        .start_dump(ob_start_dump), // <--- CONNECT THIS to your Engine's Dump Trigger
+        .start_dump(start_dump_command), // <--- CONNECT THIS to your Engine's Dump Trigger
         
         // Flow Control
         .engine_busy(engine_busy),
@@ -142,5 +168,21 @@ module trading_system_top (
     assign debug_input_fifo_empty = fifo_empty;
     assign debug_input_fifo_full  = input_fifo_full;
 
+    fifo_generator_2 uart_return_fifo (
+        .srst(rst_engine),
+        .clk(clk_engine),
+        
+        // WRITE SIDE OB Engine(200 MHz)
+        .din(trade_info), // 32 bits
+        .wr_en(trade_valid),
+        .full(), // Ehh prob not an issue
+        
+        .dout(uart_tx_data_in), // 8 bits
+        .rd_en(uart_tx_ready),
+        .empty(uart_tx_fifo_empty)
+    );
+    
+    wire uart_tx_fifo_empty;
+    assign uart_tx_data_valid = !uart_tx_fifo_empty;
 
 endmodule
