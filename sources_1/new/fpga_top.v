@@ -55,6 +55,45 @@ module fpga_top (
         .locked   (mmcm_locked_sys)
     );
 
+    // ACK LOGIC WIRES
+    // --- NEW ACK GENERATOR WIRES (for S0_1_SEND_ACK state) ---
+    wire [11:0] tx_ack_index; // 12-bit index input from trading_sys
+    wire tx_ack_start;         // Pulse input from trading_sys (r_enable_tx_ack)
+    wire tx_ack_done;          // Pulse output to trading_sys (tx_ack_done)
+    
+    // Wires for the ACK generator's AXI output
+    wire [7:0] ack_tx_data;
+    wire ack_tx_valid, ack_tx_last, ack_tx_ready;
+
+    // NEW CDC WIRES (200MHz -> 125MHz)
+    wire [11:0] tx_ack_index_synced;
+    wire tx_ack_start_synced;
+    
+    // --- CDC: ACK Index (200 MHz -> 125 MHz) ---
+    sync_data #(.WIDTH(12)) CDC_ACK_INDEX (
+        .src_clk(clk_200m),
+        .src_rst(!rst_n),
+        .src_in(tx_ack_index), // Output from trading_sys
+        .dest_clk(clk_125m),
+        .dest_rst(rst_125m),
+        .dest_out(tx_ack_index_synced) // Output to udp_ack_generator
+    );
+    
+    // --- CDC: ACK Start Pulse (200 MHz -> 125 MHz) ---
+    xpm_cdc_pulse # (
+       .DEST_SYNC_FF(4),     // Default: Number of synchronizer stages (2-10)
+      .INIT_SYNC_FF(1),     // *** FIX: Enable simulation init values (0 or 1)
+      .REG_OUTPUT(0),       // Default: 0=combinatorial output, 1=registered
+      .RST_USED(1)          // Default: 1=Resets implemented
+    ) CDC_ACK_START (
+        .src_clk(clk_200m),
+        .src_rst(!rst_n),
+        .src_pulse(tx_ack_start), // Output from trading_sys
+        .dest_clk(clk_125m),
+        .dest_rst(rst_125m),
+        .dest_pulse(tx_ack_start_synced) // Output to udp_ack_generator
+    );
+
     // -------------------------------------------------------------------------
     // 2. Ethernet PCS/PMA IP (The PHY Layer)
     // -------------------------------------------------------------------------
@@ -376,6 +415,8 @@ module fpga_top (
     wire [7:0] udp_tx_data;
     wire       udp_tx_valid, udp_tx_last, udp_tx_ready;
     
+    wire enable_udp_tx;
+    
     // Wires for UART TX Engine Output
     wire [7:0] uart_tx_data_in;
     wire       uart_tx_valid, uart_tx_ready;
@@ -386,6 +427,10 @@ module fpga_top (
     wire [31:0] debug_ob_data;   
     wire        debug_fifo_empty;
     wire        debug_fifo_full; 
+    
+    wire [2:0] debug_fsm_state;          // Connects to trading_sys.r_System_State
+    wire rx_packet_tlast_synced;         // Connects to trading_sys.rx_tlast_pulse_synced
+    wire trading_sys_tx_ack_enable;      // Connects to trading_sys.r_enable_tx_ack
     
     // Trading System Wrapper
     trading_system_top trading_sys (
@@ -413,6 +458,13 @@ module fpga_top (
         .uart_tx_data_in(uart_tx_data_in),
         .uart_tx_data_valid(uart_tx_valid),
         .uart_tx_ready(uart_tx_ready),
+        
+        .o_enable_udp_tx(enable_udp_tx),
+        
+        // ACK TX data
+        .o_tx_ack_index(tx_ack_index),
+        .o_tx_ack_start(tx_ack_start),
+        .i_tx_ack_done(tx_ack_done),
 
         // Outputs (Map these to ILA or top level pins if available)
         .trade_info(trade_info),
@@ -421,7 +473,11 @@ module fpga_top (
         .leds(), // Physical LEDs can stay connected if you want
         
         // Connect Debug Ports
-        .debug_ob_data(debug_ob_data)
+        .debug_ob_data(debug_ob_data),
+            // NEW ILA SIGNALS ADDED BELOW:
+        .debug_fsm_state(debug_fsm_state),
+        .debug_rx_tlast_synced(rx_packet_tlast_synced),
+        .debug_tx_ack_enable(trading_sys_tx_ack_enable)
 //        .debug_fifo_empty(),
 //        .debug_fifo_full()
     );
@@ -435,6 +491,8 @@ module fpga_top (
         .s_fifo_tdata(ret_fifo_tdata),
         .s_fifo_tvalid(ret_fifo_tvalid),
         .s_fifo_tready(ret_fifo_tready),
+        
+        .i_enable_tx(enable_udp_tx),
         
         // Output to MAC Arbiter
         .m_axis_tdata(udp_tx_data),
@@ -455,7 +513,73 @@ module fpga_top (
         
         .fpga_uart_tx(uart_tx)
     );
+    
 
+    // D. UDP Acknowledgment Generator (ACK)
+    udp_ack_generator ack_gen_inst (
+        .clk(clk_125m),
+        .rst(rst_125m),
+        
+        // Control and Data from Trading System FSM (must be synchronous to clk_125m!)
+        // NOTE: This interface requires a separate CDC stage if tx_ack_index/start were from clk_200m.
+        // For simplicity, we assume trading_sys.o_tx_ack_start is a pulse synchronized to clk_125m
+        .i_start_ack(tx_ack_start_synced),  // Pulse from trading_sys FSM (S0_1_SEND_ACK)
+        .i_last_index(tx_ack_index_synced), // 12-bit index from trading_sys FSM
+        .o_tx_done(tx_ack_done),
+        
+        // AXI Stream Output (to Arbiter)
+        .m_axis_tdata(ack_tx_data),
+        .m_axis_tvalid(ack_tx_valid),
+        .m_axis_tready(ack_tx_ready),
+        .m_axis_tlast(ack_tx_last)
+    );
+
+     // --- NEW: SYSTEM MANAGER FSM PARAMETERS (200 MHz Domain) ---
+    localparam S0_FETCH_DATA   = 3'd0;
+    localparam S0_1_SEND_ACK   = 3'd1; // Sub-state to pulse UDP TX
+    localparam S0_2_WAIT_DATA  = 3'd2; // Sub-state to wait for server response/timeout
+    localparam S1_MARKET_BOT   = 3'd3;
+    localparam S2_DUMP_CHECK   = 3'd4;
+    localparam S2_DUMPING      = 3'd5;
+
+    // -------------------------------------------------------------------------
+    // [FIX] CDC FOR MUX SELECT LOGIC
+    // -------------------------------------------------------------------------
+    // 1. Define selection conditions in the 200 MHz domain
+    wire select_ack_200m  = (trading_sys.r_System_State == S0_1_SEND_ACK);
+    wire select_dump_200m = (trading_sys.r_System_State == S2_DUMPING || trading_sys.r_System_State == S2_DUMP_CHECK);
+
+    // 2. Define wires for the 125 MHz domain
+    wire select_ack_125m;
+    wire select_dump_125m;
+
+    // 3. Synchronize "Select ACK" to 125 MHz
+    sync_data #(.WIDTH(1)) CDC_SEL_ACK (
+        .src_clk(clk_200m), .src_rst(!rst_n),
+        .src_in(select_ack_200m),
+        .dest_clk(clk_125m), .dest_rst(rst_125m),
+        .dest_out(select_ack_125m)
+    );
+
+    // 4. Synchronize "Select Dump/UDP" to 125 MHz
+    sync_data #(.WIDTH(1)) CDC_SEL_DUMP (
+        .src_clk(clk_200m), .src_rst(!rst_n),
+        .src_in(select_dump_200m),
+        .dest_clk(clk_125m), .dest_rst(rst_125m),
+        .dest_out(select_dump_125m)
+    );
+
+    // 5. Updated Mux Logic using synchronized (125 MHz) signals
+    // This ensures valid/ready/last switch cleanly on the network clock.
+    wire [7:0] u_tx_data  = (select_ack_125m) ? ack_tx_data  : udp_tx_data;
+    wire       u_tx_valid = (select_ack_125m) ? ack_tx_valid : udp_tx_valid;
+    wire       u_tx_last  = (select_ack_125m) ? ack_tx_last  : udp_tx_last;
+    wire       u_tx_ready;
+   
+    // Only pass 'ready' to the active module. The inactive one sees 0.
+    wire ack_tx_ready = (select_ack_125m) ? u_tx_ready : 1'b0;
+    wire udp_tx_ready = (select_dump_125m) ? u_tx_ready : 1'b0;
+    
     // AXI Stream Arbiter (Port 0 = UDP, Port 1 = ARP)
     axis_arb_mux #(
         .DATA_WIDTH(8),
@@ -472,13 +596,18 @@ module fpga_top (
         .m_axis_tready(tx_axis_tready),
         
         // Inputs: Port 0 = UDP, Port 1 = ARP
-        .s_axis_tdata({udp_tx_data, arp_tx_axis_tdata}),
-        .s_axis_tvalid({udp_tx_valid, arp_tx_axis_tvalid}),
-        .s_axis_tlast({udp_tx_last, arp_tx_axis_tlast}),
-        .s_axis_tready({udp_tx_ready, arp_tx_axis_tready}),
-        
-        // Unused sideband signals
-        .s_axis_tkeep(2'b11), // [FIX] Connect Keep
+        .s_axis_tdata({u_tx_data, arp_tx_axis_tdata}),
+        .s_axis_tvalid({u_tx_valid, arp_tx_axis_tvalid}),
+        .s_axis_tlast({u_tx_last, arp_tx_axis_tlast}),
+        .s_axis_tready({u_tx_ready, arp_tx_axis_tready}),
+        // Inputs: Port 0 = UDP, Port 1 = ARP, Port 2 = ACK
+//    .s_axis_tdata({ack_tx_data, udp_tx_data, arp_tx_axis_tdata }), // <--- FIX: Add ACK Data
+//    .s_axis_tvalid({ack_tx_valid, udp_tx_valid, arp_tx_axis_tvalid }), // <--- FIX: Add ACK Valid
+//    .s_axis_tlast({ack_tx_last, udp_tx_last, arp_tx_axis_tlast }),     // <--- FIX: Add ACK Last
+//    .s_axis_tready({ack_tx_ready, udp_tx_ready, arp_tx_axis_tready }), // <--- FIX: Add ACK Ready
+    
+    // Unused sideband signals
+        .s_axis_tkeep(3'b11), // [FIX] Connect Keep
         .s_axis_tid(0),
         .s_axis_tdest(0),
         .s_axis_tuser(0),
@@ -496,7 +625,7 @@ module fpga_top (
     
     reg [23:0] ping_stretch_cnt;
     always @(posedge clk_125m) begin
-        if (engine_busy) ping_stretch_cnt <= {24{1'b1}};
+        if (ack_tx_last) ping_stretch_cnt <= {24{1'b1}};
         else if (ping_stretch_cnt > 0) ping_stretch_cnt <= ping_stretch_cnt - 1;
     end
 
@@ -509,31 +638,43 @@ module fpga_top (
     // 7. Debugging (ILA)
     // -------------------------------------------------------------------------
     
+    // wire [7:0]  tx_axis_tdata;
+//    wire        tx_axis_tvalid;
+//    wire        tx_axis_tlast;
+//    wire        tx_axis_tready;
+    
     ila_0 my_ila (
-        .clk(clk_125m), // NOTE: We are sampling everything on 125MHz. 
-                        // Fast signals (200MHz) might look slightly jittery but 
-                        // readable for Valid/Data pulses.
+        .clk(clk_125m), // NOTE: We are sampling everything on 125MHz.
+                        
+        // SLOT 0: RAW UDP RX (Network Input - 125MHz Domain)
+        .probe0(rx_axis_tdata),       // [7:0] Raw Data
+        .probe1(rx_axis_tvalid),      // [0:0] Raw Valid (Trigger on this for packet start)
+        .probe2(rx_axis_tlast),       // [0:0] Raw Last
         
-        // SLOT 0: UDP RX (The Network Input)
-        .probe0(rx_axis_tdata),      // [7:0]
-        .probe1(rx_axis_tvalid),     // [0:0]
-        .probe2(rx_axis_tlast),      // [0:0]
+        // SLOT 1: UDP TX / ACK OUT (Network Output - 125MHz Domain)
+        .probe3(tx_axis_tdata),       // [7:0] Output Data (Arbitrated)
+        .probe4(tx_axis_tvalid),      // [0:0] Output Valid (Arbitrated)
+        .probe5(ack_tx_valid),        // [0:0] ACK Generator Valid (Trigger on this for ACK start)
         
-        // SLOT 1: UDP TX (The Echo Reply)
-        .probe3(tx_axis_tdata),      // [7:0]
-        .probe4(tx_axis_tvalid),     // [0:0]
-        .probe5(udp_tx_valid),          // [0:0] (Did UDP Engine reply?)
+        // SLOT 2: SYSTEM STATE / FLOW CONTROL (200MHz/125MHz)
+        .probe6(trading_sys.r_System_State), // [2:0] **CRITICAL: FSM State (Direct 200MHz signal)**
+        .probe7(trading_sys.engine_busy),    // [0:0] Engine Busy (Processing/Dumping)
+        .probe8(trading_sys_tx_ack_enable), // [0:0] FSM pulse: r_enable_tx_ack (200MHz)
         
-        // SLOT 2: ORDER BOOK INPUT (What did the FIFO deliver?)
-        .probe6(debug_ob_data),      // [31:0] <--- CRITICAL: Check Endianness here
-        .probe7(debug_fifo_empty),   // [0:0]
-        .probe8(ret_fifo_tvalid),    // [0:0]
+        // SLOT 3: INPUT / OUTPUT DATA MONITOR
+        .probe9(trading_sys.debug_ob_data),  // [31:0] Data pulled from FIFO (OB Input)
+        .probe10(trading_sys.trade_valid),    // [0:0] Trade/Dump Output Valid (Trigger on this!)
+        .probe11(rx_packet_tlast_synced),    // [0:0] **CRITICAL: Packet Received Pulse (Trigger on this for RX end)**
+        .probe12(trading_sys.debug_input_fifo_empty), // [0:0] FIFO Status
+        .probe13(arbiter_inst.grant),
         
-        // SLOT 3: ORDER BOOK OUTPUT (Did we trade?)
-        .probe9(trade_info),         // [31:0] <--- CRITICAL: See Trade Price/Qty
-        .probe10(trade_valid),       // [0:0]  <--- Trigger on this!
-        .probe11(engine_busy),        // [0:0]
-        .probe12(udp_tx_last)
+        .probe14(tx_axis_tdata), // [7:0],
+        .probe15(tx_axis_tvalid),
+        .probe16(tx_axis_tlast),
+        .probe17(tx_axis_tready),
+        
+        .probe18(gmii_txd),
+        .probe19(gmii_tx_en)
     );
 
 endmodule

@@ -9,6 +9,8 @@ module udp_tx_engine (
     input  wire       s_fifo_tvalid,
     output reg        s_fifo_tready,
     
+    input wire i_enable_tx,
+    
     // AXI Stream Output
     output reg  [7:0] m_axis_tdata,
     output reg        m_axis_tvalid,
@@ -51,7 +53,7 @@ module udp_tx_engine (
                     m_axis_tlast  <= 0;
                     cnt <= 0;
                     // Start if we have at least one byte of data
-                    if (s_fifo_tvalid) state <= S_HEADER;
+                    if (s_fifo_tvalid && i_enable_tx) state <= S_HEADER;
                 end
 
                 S_HEADER: begin
