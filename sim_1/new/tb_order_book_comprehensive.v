@@ -262,6 +262,56 @@ module tb_order_book_comprehensive;
         end
     endtask
 
+    // -------------------------------------------------------------------------
+    // Task: Wait for Engine Idle (with Timeout)
+    // -------------------------------------------------------------------------
+    task wait_for_engine_idle;
+        input integer max_cycles; 
+        integer cycles_count;
+        begin
+            cycles_count = 0;
+
+            // Wait while the engine is busy AND we haven't hit the timeout
+            while (engine_busy && (cycles_count < max_cycles)) begin
+                @(posedge clk_engine);
+                cycles_count = cycles_count + 1;
+            end
+
+            // Check why we exited the loop
+            if (engine_busy) begin
+                $display("[%0t] ERROR: Timeout waiting for engine_busy to fall! (Waited %0d cycles)", $time, max_cycles);
+                // Optional: Trigger a fatal error or reset
+                // $finish; 
+            end else begin
+                $display("[%0t] INFO: Engine became idle after %0d cycles.", $time, cycles_count);
+            end
+        end
+    endtask
+    
+    // -------------------------------------------------------------------------
+    // Task: Wait for UART TX FIFO to Empty (uart_tx_data_valid goes low)
+    // -------------------------------------------------------------------------
+    task wait_for_uart_tx_idle;
+        input [31:0] max_cycles; // Verilog 2001 syntax: input declared here
+        integer cycles_count;
+        begin
+            cycles_count = 0;
+
+            // Loop while data is still valid (high) and timeout not reached
+            while (uart_tx_data_valid && (cycles_count < max_cycles)) begin
+                @(posedge clk_engine);
+                cycles_count = cycles_count + 1;
+            end
+
+            // Check if we exited due to timeout or success
+            if (uart_tx_data_valid) begin
+                $display("[%0t] ERROR: Timeout waiting for uart_tx_data_valid to fall! (Waited %0d cycles)", $time, max_cycles);
+            end else begin
+                $display("[%0t] INFO: UART TX line became idle after %0d cycles.", $time, cycles_count);
+            end
+        end
+    endtask
+
     // =================================================================
     // 5. Monitors
     // =================================================================
@@ -276,32 +326,38 @@ module tb_order_book_comprehensive;
             end
         end
     end
-
-    // UART TX Monitor (Simulated Serial output)
-    initial begin
-        forever begin
-            @(negedge uart_tx_o);
-            // Monitor the raw UART pin transition. 
-            // This is complex to decode reliably in pure Verilog, 
-            // so we rely on the simulator waveform viewer and Tx Done pulses.
-             $display("[%0t] UART TX PIN: Transition detected on fpga_uart_tx.", $time);
+    
+    always @(posedge clk_engine) begin
+        if (uart_tx_ready) begin
+            $display("[%0t] DUMP OUTPUT (UART): %h", $time, uart_tx_data_in);
         end
     end
+
+    // UART TX Monitor (Simulated Serial output)
+//    initial begin
+//        forever begin
+//            @(negedge uart_tx_o);
+//            // Monitor the raw UART pin transition. 
+//            // This is complex to decode reliably in pure Verilog, 
+//            // so we rely on the simulator waveform viewer and Tx Done pulses.
+//             $display("[%0t] UART TX PIN: Transition detected on fpga_uart_tx.", $time);
+//        end
+//    end
     
     // Trade Execution Monitor (Original code, kept for completeness)
     always @(posedge clk_engine) begin
         if (trade_valid) begin
-            $display("[%0t] >>> TRADE EXEC: Price %0d, Qty %0d <<<",    
-                     $time, `PRICE(trade_info), `QTY(trade_info));
+            $display("[%0t] >>> Exporting: Price %0d, Qty %0d, IsBuy %0d, IsBot %0d <<<",    
+                     $time, `PRICE(trade_info), `QTY(trade_info), `IS_BUY(trade_info), `IS_BOT(trade_info));
         end
     end
     
     // UART TX Done Pulse Monitor
-    always @(posedge clk_engine) begin
-        if (uart_tx_channel_inst.tx_done_pulse) begin
-            $display("[%0t] UART TX CHANNEL: Low-Level Tx Done Pulse detected.", $time);
-        end
-    end
+//    always @(posedge clk_engine) begin
+//        if (uart_tx_channel_inst.tx_done_pulse) begin
+//            $display("[%0t] UART TX CHANNEL: Low-Level Tx Done Pulse detected.", $time);
+//        end
+//    end
 
 
     // =================================================================
@@ -340,88 +396,31 @@ module tb_order_book_comprehensive;
         #1000;
         check_heap_counts(1, 1); // Bids: 1, Asks: 1
 
-        $display("\n[TEST 1.5] Dumping Book via UDP...");
+        $display("\n[TEST 1.5] Dumping Book via UDP + UART...");
         send_udp_frame(OP_DUMP, 0);
-        #3000;
-        
-        #50000;
-
-        send_uart_dump_command;
-
-        #99999999;
-
-        // ----------------------------------------------------------------
-        // TEST 2: SORTING & PRIORITY (UDP)
-        // ----------------------------------------------------------------
-//        $display("\n[TEST 2] Sorting & Priority Check...");
-        
-        // Current Ask is 105.
-        // Insert 100 (Better), 102 (Middle), 108 (Worse)
-//        order_batch[0] = pack_order(100, 0, 0, 10);
-//        order_batch[1] = pack_order(102, 0, 0, 10);
-//        order_batch[2] = pack_order(108, 0, 0, 10);
-        
-//        send_udp_frame(OP_MARKET, 3);
-//        #2000;
-        
-        // ----------------------------------------------------------------
-        // TEST 3: DUPLICATE PRICE HANDLING (UDP)
-        // ----------------------------------------------------------------
-//        $display("\n[TEST 3] Duplicate Price Injection...");
-        
-//        order_batch[0] = pack_order(102, 0, 0, 5);
-//        send_udp_frame(OP_MARKET, 1);
-//        #1000;
-        
-//        // Total Asks: 105, 100, 102, 108 + new 102 = 5 Orders
-//        check_heap_counts(1, 5);
-
-//        // ----------------------------------------------------------------
-//        // TEST 4: UART DUMP TRIGGER & TX VERIFICATION
-//        // Send command FE 00 via UART. Trigger slow serial dump.
-//        // Heaps currently contain 1 Bid, 5 Asks = 6 total orders (6 * 4 bytes = 24 bytes)
-//        // Plus 4 bytes header and 1 byte footer = 29 bytes total.
-//        // ----------------------------------------------------------------
-//        $display("\n[TEST 4] UART DUMP TRIGGER Check and TX Verification...");
-        
-//        // Wait for UDP engine to clear before starting the dump
-//        repeat(10) @(posedge clk_engine); 
-        
-//        // Send the DUMP command (FE 00)
 //        send_uart_dump_command;
         
-//        // Wait for the full DUMP sequence to finish sending over the slow UART
-//        // 29 bytes * 8.68 us/byte * 1.2 overhead * 1000 = ~300,000 ns simulation time
-//        #300000; 
+//        wait_for_engine_idle(30_000);
+        
+        $display("[EDGE CASE] Add Market Data During DUMP");
+        // 1. Add a Sell (Ask) -> Ask Heap
+        order_batch[0] = pack_order(106, 0, 0, 10);    
+        send_udp_frame(OP_MARKET, 1);
+        #1000;
+        check_heap_counts(1, 2); // Bids: 0, Asks: 1
 
-//        $display("\n[TEST 4.5] Post UART Dump Check...");
-//        check_heap_counts(1, 5); // Heaps should be unchanged (1 Bid + 5 Asks)
+        // 2. Add a Buy (Bid) -> Bid Heap
+        order_batch[0] = pack_order(89, 1, 0, 10);    
+        send_udp_frame(OP_MARKET, 1);
+        #1000;
+        check_heap_counts(2, 2); // Bids: 1, Asks: 1
+        
+        wait_for_uart_tx_idle(999_999);
 
-//        // ----------------------------------------------------------------
-//        // TEST 5: THE BIG SWEEP (Execution Logic) (UDP)
-//        // ----------------------------------------------------------------
-//        $display("\n[TEST 5] The Sweep (Buy 55 @ 110)...");
-        
-//        order_batch[0] = pack_order(110, 1, 0, 55);
-//        send_udp_frame(OP_MARKET, 1);
-        
-//        #3000;
-        
-//        $display("\n[TEST 6] (Sell 5 @ 60)...");
-        
-//        order_batch[0] = pack_order(110, 0, 1, 15);
-//        send_udp_frame(OP_MARKET, 1);
-        
-//        #3000;
-        
-//        // Check Final State
-//        $display("--- POST SWEEP STATUS ---");
-//        check_heap_counts(2, 1); 
+//        send_uart_dump_command;
 
-//        $display("---DUMP POST SWEEP (UDP) ---");
-//        send_udp_frame(OP_DUMP, 0);
         
-//        #3000;
+
 
         $display("\n=== TEST COMPLETE ===");
         $finish;

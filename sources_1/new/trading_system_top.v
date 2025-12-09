@@ -70,10 +70,19 @@ module trading_system_top (
 
     wire udp_trigger_synced; // Result of 125MHz -> 200MHz CDC Pulse
     
-    xpm_cdc_pulse CDC_UDP_to_ENGINE (
-         .src_clk(clk_udp), .dest_clk(clk_engine),
-         .src_pulse(trigger_dump_raw), .dest_pulse(udp_trigger_synced)
-     );
+    xpm_cdc_pulse #(
+      .DEST_SYNC_FF(4),     // Default: Number of synchronizer stages (2-10)
+      .INIT_SYNC_FF(1),     // *** FIX: Enable simulation init values (0 or 1)
+      .REG_OUTPUT(0),       // Default: 0=combinatorial output, 1=registered
+      .RST_USED(1)          // Default: 1=Resets implemented
+    ) CDC_UDP_to_ENGINE (
+      .dest_pulse(udp_trigger_synced), // Output pulse
+      .dest_clk(clk_engine),           // 200 MHz clock
+      .dest_rst(rst_engine),           // *** FIX: Destination reset signal
+      .src_clk(clk_udp),               // 125 MHz clock
+      .src_pulse(trigger_dump_raw),    // Input pulse
+      .src_rst(rst_udp)                // *** FIX: Source reset signal
+    );
     
     wire start_dump_command;
 
