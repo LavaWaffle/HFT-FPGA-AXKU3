@@ -10,7 +10,8 @@ module fpga_top (
     input  wire       sys_clk_p,
     input  wire       sys_clk_n,
     
-    input  wire       rst_n, // Active Low Reset (Key)
+    input  wire       rst_n_i, // Active Low Reset (Key)
+    input  wire       bot_trig_n_i, // Active low 
 
     // SFP / GTY Interface (Bank 226 - SFP1)
     input  wire       sfp_rx_p,
@@ -53,6 +54,17 @@ module fpga_top (
         .clk_out1 (clk_50m),     // 50MHz for DRP
         .reset    (!rst_n),      // Active High Reset
         .locked   (mmcm_locked_sys)
+    );
+
+    wire rst_n;
+    wire bot_trig_n;
+
+    // 1.5 Input Debouncing
+    sync_debounce button_sync [1:0] (
+        .clk(clk_200m),
+        .d({rst_n_i, bot_trig_n_i}),
+
+        .q({rst_n, bot_trig_n})
     );
 
     // -------------------------------------------------------------------------
@@ -395,6 +407,8 @@ module fpga_top (
         .clk_engine(clk_200m),    // Using your 200MHz buffer
         .rst_engine(!rst_n),      // Use system reset
 
+        .toggle_bot_enable(!bot_trig_n),
+
         // RX Stream (Connects to the same wires as UDP Echo)
         .rx_axis_tdata(rx_axis_tdata),
         .rx_axis_tvalid(rx_axis_tvalid),
@@ -500,7 +514,14 @@ module fpga_top (
         else if (ping_stretch_cnt > 0) ping_stretch_cnt <= ping_stretch_cnt - 1;
     end
 
-    assign led[0] = hb_cnt[26];           // Heartbeat (Alive)
+
+    reg [23:0] bot_trade_stretch_cnt;
+    always @(posedge clk_200m) begin
+        if (trading_sys.trading_bot.bot_valid) bot_trade_stretch_cnt <= {24{1'b1}};
+        else if (bot_trade_stretch_cnt > 0) bot_trade_stretch_cnt <= bot_trade_stretch_cnt - 1;
+    end
+
+    assign led[0] = |bot_trade_stretch_cnt; // Bot Trade Activity
     assign led[1] = eth_mmcm_locked;      // Ethernet Clock Good
     assign led[2] = status_link_up;       // Link Up
     assign led[3] = |ping_stretch_cnt;    // Ping Activity
@@ -522,7 +543,7 @@ module fpga_top (
         // SLOT 1: UDP TX (The Echo Reply)
         .probe3(tx_axis_tdata),      // [7:0]
         .probe4(tx_axis_tvalid),     // [0:0]
-        .probe5(udp_tx_valid),          // [0:0] (Did UDP Engine reply?)
+        .probe5(trading_sys.start_dump_command),          // [0:0] (Did UDP Engine reply?)
         
         // SLOT 2: ORDER BOOK INPUT (What did the FIFO deliver?)
         .probe6(debug_ob_data),      // [31:0] <--- CRITICAL: Check Endianness here
@@ -533,7 +554,15 @@ module fpga_top (
         .probe9(trade_info),         // [31:0] <--- CRITICAL: See Trade Price/Qty
         .probe10(trade_valid),       // [0:0]  <--- Trigger on this!
         .probe11(engine_busy),        // [0:0]
-        .probe12(udp_tx_last)
+        .probe12(trading_sys.ob_inst.state),        // [2:0]
+
+        // Slot 4: UART I/O
+        .probe13(uart_rx_data_out),  // [7:0]
+        .probe14(uart_rx_data_valid),// [0:0]
+        .probe15(uart_tx_data_in),   // [7:0]
+        .probe16(uart_tx_valid),      // [0:0]
+        .probe17(trading_sys.uart_trigger_dump_raw) // [0:0]
+
     );
 
 endmodule

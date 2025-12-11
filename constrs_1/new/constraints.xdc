@@ -39,8 +39,11 @@ set_property IOSTANDARD LVCMOS33 [get_ports {led[*]}]
 # ------------------------------------------------------------------------------
 # Reset (Key 1 - Bank 87)
 # ------------------------------------------------------------------------------
-set_property PACKAGE_PIN J14 [get_ports rst_n]
-set_property IOSTANDARD LVCMOS33 [get_ports rst_n]
+set_property PACKAGE_PIN J14 [get_ports rst_n_i]
+set_property IOSTANDARD LVCMOS33 [get_ports rst_n_i]
+
+set_property PACKAGE_PIN J15 [get_ports bot_trig_n_i]
+set_property IOSTANDARD LVCMOS33 [get_ports bot_trig_n_i]
 
 # UART
 set_property PACKAGE_PIN AD15 [get_ports uart_tx]

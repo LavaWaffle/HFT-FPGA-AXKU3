@@ -8,6 +8,9 @@ module trading_system_top (
     input  wire        clk_engine,    // 200 MHz (Engine Side)
     input  wire        rst_engine,
 
+    // BOT Trigger
+    input wire         toggle_bot_enable, // From external button
+
     // UDP RX Stream (From MAC)
     input  wire [7:0]  rx_axis_tdata,
     input  wire        rx_axis_tvalid,
@@ -36,6 +39,64 @@ module trading_system_top (
     output wire        debug_input_fifo_empty,
     output wire        debug_input_fifo_full 
 );
+
+    // -------------------------------------------------------------------------
+    // -1. FRONT RUNNER BOT (200 MHz)
+    // -------------------------------------------------------------------------
+    reg bot_is_enabled;
+    reg prev_toggle_bot_enable;
+
+    always @(posedge clk_engine) begin
+        prev_toggle_bot_enable <= toggle_bot_enable;
+
+        if (rst_engine) begin
+            bot_is_enabled <= 1'b0;
+        end else begin
+            // Toggle on button press
+            if (toggle_bot_enable && !prev_toggle_bot_enable) begin
+                bot_is_enabled <= ~bot_is_enabled;
+            end
+        end
+    end
+
+    wire [31:0]  bot_fifo_data;
+    wire        bot_fifo_valid;
+    wire        bot_fifo_full;
+
+    front_runner_bot trading_bot (
+        .clk(clk_engine),
+        .rst(rst_engine),
+        .enable(bot_is_enabled),
+
+        .bid_root(ob_inst.bid_root),
+        .ask_root(ob_inst.ask_root),
+
+        .udp_fifo_has_data(!fifo_empty), // High if UDP FIFO has data (Bot must yield)
+        .engine_busy(engine_busy),
+
+        .bot_valid(bot_fifo_valid),
+        .bot_data(bot_fifo_data),
+        .bot_full(bot_fifo_full)
+    );
+
+    wire [31:0] bot_out_order;
+    wire        bot_fifo_read_en;
+    wire        bot_fifo_empty;
+
+    fifo_generator_3 bot_fifo(
+        .srst(rst_engine),
+        .clk(clk_engine),
+
+        // WRITE SIDE BOT
+        .din(bot_fifo_data), // 32 bits
+        .wr_en(bot_fifo_valid),
+        .full(bot_fifo_full),
+
+        .dout(bot_out_order), // 32 bits
+        .rd_en(bot_fifo_read_en),
+        .empty(bot_fifo_empty)
+    );
+
     wire uart_trigger_dump_raw;
     // -------------------------------------------------------------------------
     // 0. UART EXTRACTOR (200 MHz) - Now with Trigger Logic
@@ -116,6 +177,8 @@ module trading_system_top (
     // -------------------------------------------------------------------------
     // Only read if we have data AND engine is ready
     assign fifo_rd_en = (!fifo_empty) && (!engine_busy);
+    // For Bot Integration: (no data in main FIFO, bot has data, engine not busy)
+    assign bot_fifo_read_en = (fifo_empty) && (!bot_fifo_empty) && (!engine_busy);
     
     // NOP Filter: Only valid if data is non-zero
     wire [31:0] ob_input_data;
@@ -136,11 +199,15 @@ module trading_system_top (
         .clk(clk_engine),
         .rst_n(!rst_engine),
         
-        // Input
+        // External IO Input
         .input_valid(ob_input_valid),
         .input_data(ob_input_data),
         .start_dump(start_dump_command), // <--- CONNECT THIS to your Engine's Dump Trigger
         
+        // Bot Input
+        .bot_input_valid(!bot_fifo_empty),
+        .bot_input_data(bot_out_order),
+
         // Flow Control
         .engine_busy(engine_busy),
         

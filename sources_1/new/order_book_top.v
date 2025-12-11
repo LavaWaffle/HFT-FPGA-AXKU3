@@ -7,6 +7,10 @@ module order_book_top (
     // --- External Interface (UDP/Strategy) ---
     input wire input_valid,
     input wire [31:0] input_data, // {Price, IsBuy, ID, Qty}
+
+    // --- Bot Interface ---
+    input wire bot_input_valid,
+    input wire [31:0] bot_input_data, // {Price, Side, ID, Qty}
     
     // NEW: Trigger from Payload Extractor
     input wire start_dump,
@@ -63,11 +67,17 @@ module order_book_top (
     wire [31:0] heap_ask_wdata;
     wire [31:0] ask_ram_rdata; 
 
+    // --- Mux Between Normal Input and Bot Input ---
+    // Priority given to Normal Input
+    wire        ob_input_valid = dumping_active ? 1'b0  : (input_valid | bot_input_valid);
+    wire [31:0] ob_input_data  = dumping_active ? 32'd0 : (input_valid ? input_data : (bot_input_valid ? bot_input_data : 32'd0));
+                    
+
     matching_engine u_engine (
         .clk            (clk),
         .rst_n          (rst_n),
-        .input_valid    (input_valid && !dumping_active), 
-        .input_data     (input_data),
+        .input_valid    (ob_input_valid),
+        .input_data     (ob_input_data),
         .engine_busy    (internal_engine_busy),
         .bid_root       (bid_root),
         .bid_empty      (bid_empty),
