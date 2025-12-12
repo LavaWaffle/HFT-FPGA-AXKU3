@@ -179,7 +179,7 @@ module trading_system_top (
     assign fifo_rd_en = (!fifo_empty) && (!engine_busy);
     // For Bot Integration: (no data in main FIFO, bot has data, engine not busy)
     assign bot_fifo_read_en = (fifo_empty) && (!bot_fifo_empty) && (!engine_busy);
-    
+//    assign bot_fifo_read_en = 1'b0;
     // NOP Filter: Only valid if data is non-zero
     wire [31:0] ob_input_data;
     // Endianness Swap (Big -> Little)

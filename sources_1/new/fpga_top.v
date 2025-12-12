@@ -520,9 +520,15 @@ module fpga_top (
         if (trading_sys.trading_bot.bot_valid) bot_trade_stretch_cnt <= {24{1'b1}};
         else if (bot_trade_stretch_cnt > 0) bot_trade_stretch_cnt <= bot_trade_stretch_cnt - 1;
     end
+    
+    reg [23:0] bot_on_stretch_cnt;
+    always @(posedge clk_200m) begin
+        if (trading_sys.bot_is_enabled) bot_on_stretch_cnt <= {24{1'b1}};
+        else if (bot_on_stretch_cnt > 0) bot_on_stretch_cnt <= bot_on_stretch_cnt - 1;
+    end
 
     assign led[0] = |bot_trade_stretch_cnt; // Bot Trade Activity
-    assign led[1] = eth_mmcm_locked;      // Ethernet Clock Good
+    assign led[1] = |bot_on_stretch_cnt;      // Ethernet Clock Good
     assign led[2] = status_link_up;       // Link Up
     assign led[3] = |ping_stretch_cnt;    // Ping Activity
     
@@ -542,7 +548,7 @@ module fpga_top (
         
         // SLOT 1: UDP TX (The Echo Reply)
         .probe3(tx_axis_tdata),      // [7:0]
-        .probe4(tx_axis_tvalid),     // [0:0]
+        .probe4(trading_sys.trading_bot.bot_valid),     // [0:0]
         .probe5(trading_sys.start_dump_command),          // [0:0] (Did UDP Engine reply?)
         
         // SLOT 2: ORDER BOOK INPUT (What did the FIFO deliver?)

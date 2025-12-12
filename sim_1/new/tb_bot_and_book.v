@@ -348,7 +348,15 @@ module tb_bot_and_book;
         tx_fifo_tready = 1; // Enable reading the dump
         send_udp_frame(OP_DUMP, 0);
         
-        #50000; // Wait for dump to clear
+        order_batch[0] = pack_order(92, 1, 0, 10); 
+        order_batch[1] = pack_order(94, 1, 0, 10);
+        send_udp_frame(OP_MARKET, 10);
+        
+        send_udp_frame(OP_DUMP, 0);
+        
+        check_heap_counts(5, 5); 
+        
+        #50000;
 
         $display("\n=== TEST COMPLETE ===");
         $finish;

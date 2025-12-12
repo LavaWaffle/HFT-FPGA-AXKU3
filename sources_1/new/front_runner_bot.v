@@ -72,9 +72,15 @@ module front_runner_bot (
                     end
                     // If Top is NOT a Bot, Front Run it!
                     else if (`IS_BOT(bid_root) == 1'b0) begin
-                        target_price <= `PRICE(bid_root) + 1; // Price + 1
-                        target_side  <= `TYPE_BID; // Bid
-                        state <= S_SEND_CMD;
+                        if (ask_root != 0 && ((`PRICE(bid_root) + 1) <= `PRICE(ask_root))) begin
+                            target_price <= `PRICE(bid_root) + 1; // Price + 1
+                            target_side  <= `TYPE_BID; // Bid
+                            state <= S_SEND_CMD;
+                        end else begin
+                            state <= S_CHECK_ASK;
+                        end
+                        
+                        
                     end 
                     // If Top IS a Bot, ignore and check Asks
                     else begin
@@ -94,9 +100,14 @@ module front_runner_bot (
                     else if (`IS_BOT(ask_root) == 1'b0) begin
                         // Don't underflow 0
                         if (`PRICE(ask_root) > 1) begin
-                            target_price <= `PRICE(ask_root) - 1; // Price - 1
-                            target_side  <= `TYPE_ASK; // Ask
-                            state <= S_SEND_CMD;
+                        
+                            if (bid_root != 0 && ((`PRICE(ask_root) - 1) <= `PRICE(bid_root))) begin
+                                state <= S_IDLE; // Spread too tight, skip Asking
+                            end else begin
+                                target_price <= `PRICE(ask_root) - 1;
+                                target_side  <= `TYPE_ASK;
+                                state <= S_SEND_CMD;
+                            end
                         end else begin
                             state <= S_IDLE;
                         end
